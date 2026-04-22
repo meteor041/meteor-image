@@ -38,10 +38,10 @@ meteor-image/
 
 ## Install
 
-If you have the Codex skill installer scripts available, install from GitHub with:
+Install via the GitHub-hosted script:
 
 ```bash
-curl -sL https://meteor041.com/install-meteor-image.sh | bash
+curl -fsSL https://raw.githubusercontent.com/meteor041/meteor-image/main/install-meteor-image.sh | bash
 ```
 
 Or install manually by copying the `meteor-image` directory into:

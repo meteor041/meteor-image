@@ -1,7 +1,21 @@
-mkdir -p ~/.codex/skills
-cd ~/.codex/skills
+#!/usr/bin/env bash
 
-curl -L https://github.com/meteor041/meteor-image/archive/refs/heads/main.tar.gz \
-  | tar -xz
+set -euo pipefail
 
-mv meteor-image-main meteor-image
+target_dir="${HOME}/.codex/skills"
+final_dir="${target_dir}/meteor-image"
+tmp_dir="$(mktemp -d)"
+
+cleanup() {
+  rm -rf "${tmp_dir}"
+}
+
+trap cleanup EXIT
+
+mkdir -p "${target_dir}"
+
+curl -fsSL "https://github.com/meteor041/meteor-image/archive/refs/heads/main.tar.gz" \
+  | tar -xz -C "${tmp_dir}"
+
+rm -rf "${final_dir}"
+mv "${tmp_dir}/meteor-image-main" "${final_dir}"

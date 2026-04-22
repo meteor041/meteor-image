@@ -38,10 +38,10 @@ meteor-image/
 
 ## 安装
 
-如果你已经有 Codex 技能安装脚本，可以通过 GitHub 执行：
+通过 GitHub 托管的安装脚本执行：
 
 ```bash
-curl -sL https://meteor041.com/install-meteor-image.sh | bash
+curl -fsSL https://raw.githubusercontent.com/meteor041/meteor-image/main/install-meteor-image.sh | bash
 ```
 
 或者手动将 `meteor-image` 目录复制到：
