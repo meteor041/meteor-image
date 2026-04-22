@@ -83,3 +83,10 @@ If generation succeeds:
 3. Briefly note which route succeeded:
    - `/images/generations`
    - `/responses`
+
+## Output Rules
+
+- Always save the generated image as a local file (e.g. `output.png`)
+- Always return the file path in the response
+- Do NOT embed the image inline in the message
+- Do NOT rely on UI preview rendering
