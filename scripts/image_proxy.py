@@ -32,6 +32,7 @@ FALLBACK_RESPONSE_MODELS = (
 )
 DEFAULT_TEST_PROMPT = "Create a small flat blue square icon on a white background."
 FORCE_CURL_TRANSPORTS: set[str] = set()
+DEFAULT_HTTP_TIMEOUT = 240
 DEFAULT_REQUEST_HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
@@ -180,7 +181,7 @@ def request_json(
     method: str,
     path: str,
     payload: dict[str, Any] | None = None,
-    timeout: int = 90,
+    timeout: int = DEFAULT_HTTP_TIMEOUT,
 ) -> Any:
     transport_key = get_transport_key(base_url)
     if transport_key in FORCE_CURL_TRANSPORTS:
@@ -237,7 +238,7 @@ def request_json_via_requests(
     method: str,
     path: str,
     payload: dict[str, Any] | None = None,
-    timeout: int = 90,
+    timeout: int = DEFAULT_HTTP_TIMEOUT,
 ) -> Any:
     headers = build_request_headers(api_key, include_json_content_type=payload is not None)
     session = build_requests_session()
@@ -298,7 +299,7 @@ def request_json_via_curl(
     method: str,
     path: str,
     payload: dict[str, Any] | None = None,
-    timeout: int = 90,
+    timeout: int = DEFAULT_HTTP_TIMEOUT,
 ) -> Any:
     curl_bin = shutil.which("curl.exe") or shutil.which("curl")
     if not curl_bin:
@@ -646,7 +647,7 @@ def fetch_binary_url(url: str) -> bytes:
     session = build_requests_session()
     headers = dict(DEFAULT_REQUEST_HEADERS)
     headers.pop("Content-Type", None)
-    response = session.get(url, headers=headers, timeout=90)
+    response = session.get(url, headers=headers, timeout=DEFAULT_HTTP_TIMEOUT)
     response.raise_for_status()
     return response.content
 
