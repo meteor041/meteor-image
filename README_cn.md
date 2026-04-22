@@ -44,6 +44,12 @@ meteor-image/
 curl -fsSL https://raw.githubusercontent.com/meteor041/meteor-image/main/install-meteor-image.sh | bash
 ```
 
+Windows PowerShell 可执行：
+
+```powershell
+irm https://raw.githubusercontent.com/meteor041/meteor-image/main/install-meteor-image.ps1 | iex
+```
+
 或者手动将 `meteor-image` 目录复制到：
 
 ```text

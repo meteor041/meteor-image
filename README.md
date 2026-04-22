@@ -44,6 +44,12 @@ Install via the GitHub-hosted script:
 curl -fsSL https://raw.githubusercontent.com/meteor041/meteor-image/main/install-meteor-image.sh | bash
 ```
 
+On Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/meteor041/meteor-image/main/install-meteor-image.ps1 | iex
+```
+
 Or install manually by copying the `meteor-image` directory into:
 
 ```text
