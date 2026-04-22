@@ -1,5 +1,7 @@
 # meteor-image
 
+[English](./README.md) | [简体中文](./README_cn.md)
+
 `meteor-image` is a Codex skill for generating images through the `meteor041.com` OpenAI-compatible proxy.
 
 Works seamlessly with OpenAI-compatible proxies (like meteor041.com), enabling image generation in Codex with the same proxy settings you already use.
