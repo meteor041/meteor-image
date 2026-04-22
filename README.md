@@ -1,6 +1,6 @@
-# meteor041-imagegen
+# meteor-image
 
-`meteor041-imagegen` is a Codex skill for generating images through the `meteor041.com` OpenAI-compatible proxy.
+`meteor-image` is a Codex skill for generating images through the `meteor041.com` OpenAI-compatible proxy.
 
 Works seamlessly with OpenAI-compatible proxies (like meteor041.com), enabling image generation in Codex with the same proxy settings you already use.
 
@@ -24,7 +24,7 @@ That means if Codex is already configured to use the `meteor041.com` proxy, this
 ## Skill Layout
 
 ```text
-meteor041-imagegen/
+meteor-image/
 ├─ SKILL.md
 ├─ agents/
 │  └─ openai.yaml
@@ -42,7 +42,7 @@ If you have the Codex skill installer scripts available, install from GitHub wit
 curl -sL https://meteor041.com/install-meteor-image.sh | bash
 ```
 
-Or install manually by copying the `meteor041-imagegen` directory into:
+Or install manually by copying the `meteor-image` directory into:
 
 ```text
 ~/.codex/skills/
@@ -55,19 +55,19 @@ After installing, restart Codex so the new skill is discovered.
 Example prompt:
 
 ```text
-Use $meteor041-imagegen to create a realistic WeChat screenshot mockup.
+Use $meteor-image to create a realistic WeChat screenshot mockup.
 ```
 
 Capability detection:
 
 ```bash
-python meteor041-imagegen/scripts/detect_image_capability.py
+python meteor-image/scripts/detect_image_capability.py
 ```
 
 Generate an image:
 
 ```bash
-python meteor041-imagegen/scripts/generate_image.py --prompt "A realistic phone screenshot mockup"
+python meteor-image/scripts/generate_image.py --prompt "A realistic phone screenshot mockup"
 ```
 
 ## Configuration

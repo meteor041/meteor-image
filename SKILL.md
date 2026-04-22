@@ -1,9 +1,9 @@
 ---
-name: "meteor041-imagegen"
+name: "meteor-image"
 description: "Use this skill when the user asks to generate, render, draw, create, design, mock up, or edit an image, screenshot, poster, illustration, UI mockup, visual asset, or diagram through the configured meteor041.com-compatible OpenAI proxy. Do not use this skill for text-only writing, coding, or analysis tasks."
 ---
 
-# Meteor041 Image Generation Skill
+# Meteor Image Generation Skill
 
 Use this skill to generate images through a third-party OpenAI-compatible proxy.
 
