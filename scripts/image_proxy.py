@@ -8,11 +8,11 @@ import shutil
 import subprocess
 import tempfile
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from typing import Any
+
+import requests
 
 try:
     import tomllib
@@ -32,6 +32,17 @@ FALLBACK_RESPONSE_MODELS = (
 )
 DEFAULT_TEST_PROMPT = "Create a small flat blue square icon on a white background."
 FORCE_CURL_TRANSPORTS: set[str] = set()
+DEFAULT_REQUEST_HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/135.0.0.0 Safari/537.36"
+    ),
+    "Origin": "https://meteor041.com",
+    "Referer": "https://meteor041.com/",
+}
 
 
 class ConfigError(RuntimeError):
@@ -183,7 +194,7 @@ def request_json(
         )
 
     try:
-        return request_json_via_urllib(
+        return request_json_via_requests(
             base_url=base_url,
             api_key=api_key,
             method=method,
@@ -205,7 +216,21 @@ def request_json(
         )
 
 
-def request_json_via_urllib(
+def build_request_headers(api_key: str, *, include_json_content_type: bool = True) -> dict[str, str]:
+    headers = dict(DEFAULT_REQUEST_HEADERS)
+    headers["Authorization"] = f"Bearer {api_key}"
+    if not include_json_content_type:
+        headers.pop("Content-Type", None)
+    return headers
+
+
+def build_requests_session() -> requests.Session:
+    session = requests.Session()
+    session.trust_env = False
+    return session
+
+
+def request_json_via_requests(
     *,
     base_url: str,
     api_key: str,
@@ -214,35 +239,43 @@ def request_json_via_urllib(
     payload: dict[str, Any] | None = None,
     timeout: int = 90,
 ) -> Any:
-    data = None
-    headers = {
-        "Accept": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-
-    request = urllib.request.Request(
-        f"{base_url}{path}",
-        data=data,
-        headers=headers,
-        method=method.upper(),
-    )
+    headers = build_request_headers(api_key, include_json_content_type=payload is not None)
+    session = build_requests_session()
 
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read()
-    except urllib.error.HTTPError as error:
-        body = error.read().decode("utf-8", errors="replace")
+        response = session.request(
+            method=method.upper(),
+            url=f"{base_url}{path}",
+            headers=headers,
+            json=payload,
+            timeout=timeout,
+        )
+    except requests.RequestException as error:
+        message = str(error)
+        response = getattr(error, "response", None)
+        if response is not None:
+            body = response.text
+            raise ApiError(
+                path=path,
+                status_code=response.status_code,
+                message=extract_error_message(body),
+                raw_body=body,
+            ) from error
         raise ApiError(
             path=path,
-            status_code=error.code,
+            status_code=None,
+            message=message,
+        ) from error
+
+    raw = response.content
+    if response.status_code >= 400:
+        body = response.text
+        raise ApiError(
+            path=path,
+            status_code=response.status_code,
             message=extract_error_message(body),
             raw_body=body,
-        ) from error
-    except urllib.error.URLError as error:
-        raise ApiError(path=path, status_code=None, message=str(error.reason)) from error
+        )
 
     if not raw:
         return {}
@@ -271,10 +304,7 @@ def request_json_via_curl(
     if not curl_bin:
         raise ApiError(path=path, status_code=None, message="curl is not available")
 
-    headers = [
-        "Accept: application/json",
-        f"Authorization: Bearer {api_key}",
-    ]
+    headers = [f"{key}: {value}" for key, value in build_request_headers(api_key).items()]
     command = [
         curl_bin,
         "-sS",
@@ -290,7 +320,6 @@ def request_json_via_curl(
         command.extend(["-D", str(header_path), "-o", str(body_path), "--max-time", str(timeout)])
 
         if payload is not None:
-            headers.append("Content-Type: application/json")
             command.extend(["--data-binary", json.dumps(payload)])
 
         for header in headers:
@@ -614,8 +643,35 @@ def extract_response_image_bytes(response: dict[str, Any]) -> bytes:
 
 
 def fetch_binary_url(url: str) -> bytes:
-    with urllib.request.urlopen(url, timeout=90) as response:
-        return response.read()
+    session = build_requests_session()
+    headers = dict(DEFAULT_REQUEST_HEADERS)
+    headers.pop("Content-Type", None)
+    response = session.get(url, headers=headers, timeout=90)
+    response.raise_for_status()
+    return response.content
+
+
+def should_fallback_to_secondary_route(error: Exception) -> bool:
+    if not isinstance(error, ApiError):
+        return True
+    if error.status_code in {401}:
+        return False
+    error_text = " ".join(
+        part for part in (error.message, error.raw_body or "") if isinstance(part, str)
+    ).lower()
+    transient_markers = (
+        "cloudflare",
+        "browser's signature",
+        "error 1010",
+        "missing close_notify",
+        "proxyerror",
+        "remote end closed connection",
+        "remote disconnected",
+        "max retries exceeded",
+    )
+    return error.status_code in {None, 403, 429, 500, 502, 503, 504} or any(
+        marker in error_text for marker in transient_markers
+    )
 
 
 def classify_error(route: str | None, error: Exception) -> str:
@@ -625,6 +681,17 @@ def classify_error(route: str | None, error: Exception) -> str:
         error_text = " ".join(
             part for part in (error.message, error.raw_body or "") if isinstance(part, str)
         ).lower()
+        if any(
+            marker in error_text
+            for marker in (
+                "missing close_notify",
+                "proxyerror",
+                "remote end closed connection",
+                "remote disconnected",
+                "max retries exceeded",
+            )
+        ):
+            return "transport_instability"
         if "cloudflare" in error_text or "browser's signature" in error_text or "error 1010" in error_text:
             return "proxy_incompatibility"
         if error.status_code in {401, 403}:
@@ -633,8 +700,19 @@ def classify_error(route: str | None, error: Exception) -> str:
             return "missing_images_generations"
         if route == "/responses" and error.status_code in {404, 405, 410, 501}:
             return "missing_responses"
+        if error.status_code in {429, 500, 502, 503, 504}:
+            return "transport_instability"
         return "proxy_incompatibility"
     return "proxy_incompatibility"
+
+
+def iter_generation_routes(primary_route: str | None) -> list[str]:
+    routes = [primary_route or "/images/generations", "/images/generations", "/responses"]
+    unique_routes: list[str] = []
+    for route in routes:
+        if route not in unique_routes:
+            unique_routes.append(route)
+    return unique_routes
 
 
 def detect_capability(
@@ -761,29 +839,62 @@ def generate_image(
     route = report["route"]
     image_model = report["image_model"]
     responses_model = report["responses_model"]
+    generation_errors: list[dict[str, str]] = []
+    image_bytes: bytes | None = None
+    used_model: str | None = None
+    used_route: str | None = None
 
-    if route == "/images/generations":
-        image_bytes, _ = call_images_generation(
-            base_url=resolved_base_url,
-            api_key=resolved_api_key,
-            model=image_model,
-            prompt=prompt,
-            size=size,
-            quality=quality,
-            background=background,
+    for candidate_route in iter_generation_routes(route):
+        try:
+            if candidate_route == "/images/generations":
+                image_bytes, _ = call_images_generation(
+                    base_url=resolved_base_url,
+                    api_key=resolved_api_key,
+                    model=image_model,
+                    prompt=prompt,
+                    size=size,
+                    quality=quality,
+                    background=background,
+                )
+                used_model = image_model
+            else:
+                image_bytes, _ = call_responses_generation(
+                    base_url=resolved_base_url,
+                    api_key=resolved_api_key,
+                    model=responses_model,
+                    prompt=prompt,
+                    size=size,
+                    quality=quality,
+                    background=background,
+                )
+                used_model = responses_model
+            used_route = candidate_route
+            break
+        except Exception as error:
+            generation_errors.append(
+                {
+                    "route": candidate_route,
+                    "reason": classify_error(candidate_route, error),
+                    "error": str(error),
+                }
+            )
+            if not should_fallback_to_secondary_route(error):
+                break
+
+    if image_bytes is None or used_model is None or used_route is None:
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "supported": True,
+                    "base_url": resolved_base_url,
+                    "image_model": image_model,
+                    "responses_model": responses_model,
+                    "route": route,
+                    "generation_errors": generation_errors,
+                },
+                indent=2,
+            )
         )
-        used_model = image_model
-    else:
-        image_bytes, _ = call_responses_generation(
-            base_url=resolved_base_url,
-            api_key=resolved_api_key,
-            model=responses_model,
-            prompt=prompt,
-            size=size,
-            quality=quality,
-            background=background,
-        )
-        used_model = responses_model
 
     output_path = resolve_output_path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -791,7 +902,7 @@ def generate_image(
 
     return {
         "saved_path": str(output_path),
-        "route": route,
+        "route": used_route,
         "model": used_model,
         "image_model": image_model,
         "responses_model": responses_model,

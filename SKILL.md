@@ -19,8 +19,8 @@ Before generating an image, verify that the configured upstream actually support
    - Probe `POST {BASE_URL}/images/generations` first.
    - If that fails, probe `POST {BASE_URL}/responses`.
    - If the configured base URL is only the site root, also retry with `/v1`.
-4. If `/images/generations` works, use it as the primary route.
-5. If `/images/generations` fails but `/responses` succeeds, use `/responses`.
+4. Prefer `/images/generations` as the primary route, but do not assume the first successful probe will remain stable during the real generation call.
+5. During the real generation call, if the primary route fails with transport instability, Cloudflare signature blocking, or transient `5xx` errors, automatically retry via the alternate route.
 6. If neither route succeeds, report that the proxy does not currently expose image generation.
 
 Do not assume image support purely because text completion works.
@@ -39,6 +39,8 @@ Pass through optional arguments when the user provides them:
 - `--quality`
 - `--background`
 - `--output`
+
+The script now uses a browser-like HTTP profile and disables inherited environment proxy settings to reduce Cloudflare and proxy-related failures. It also prefers inline image bytes such as `b64_json` over downloading a returned image URL.
 
 If the user asks to edit an existing image, first confirm that the upstream proxy supports image editing. If it does not, state that only image generation is currently available.
 
@@ -60,7 +62,15 @@ If capability detection or generation fails, clearly report the most likely caus
 - missing `/images/generations`
 - missing `/responses`
 - authentication failure
+- transport instability
 - proxy incompatibility
+
+If capability detection succeeds but the real generation call still fails, prefer diagnosing:
+
+- unstable transport or TLS/download failure
+- Cloudflare/browser-signature blocking
+- transient upstream `502`/`503`/`504` errors
+- local environment proxy interference
 
 Do not claim success unless the API actually returns a valid image result.
 
