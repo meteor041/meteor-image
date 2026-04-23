@@ -35,6 +35,10 @@ python scripts/generate_image.py --prompt "<user prompt>"
 
 Pass through optional arguments when the user provides them:
 
+- `--image` (repeatable local image path)
+- `--image-url` (repeatable remote image URL)
+- `--mask` (PNG mask path for `/images/edits`)
+- `--input-fidelity`
 - `--size`
 - `--quality`
 - `--background`
@@ -42,7 +46,18 @@ Pass through optional arguments when the user provides them:
 
 The script now uses a browser-like HTTP profile and disables inherited environment proxy settings to reduce Cloudflare and proxy-related failures. It also prefers inline image bytes such as `b64_json` over downloading a returned image URL.
 
-If the user asks to edit an existing image, first confirm that the upstream proxy supports image editing. If it does not, state that only image generation is currently available.
+If the user asks to edit an existing image, the script now supports:
+
+- local files via `--image path/to/file.png`
+- remote files via `--image-url https://...`
+- masked local edits via `--image ... --mask mask.png`
+
+Route selection rules:
+
+- pure text generation prefers `/images/generations` and falls back to `/responses`
+- image edits prefer `/images/edits`
+- mixed local `--image` and remote `--image-url` inputs fall back to `/responses`
+- `--mask` currently requires local `--image` files and a PNG mask
 
 ## Prompt Construction
 

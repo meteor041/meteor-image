@@ -20,6 +20,7 @@ That means if Codex is already configured to use a compatible `sub2api` endpoint
 - Detect whether the configured upstream supports image generation
 - Prefer `/images/generations`
 - Fall back to `/responses` if needed
+- Accept local input images, image URLs, and PNG masks for edit flows
 - Retry root base URLs with `/v1`
 - Work around Cloudflare/WAF blocks that reject Python `urllib` fingerprints by falling back to `curl`
 
@@ -77,6 +78,31 @@ Generate an image:
 ```bash
 python meteor-image/scripts/generate_image.py --prompt "A realistic phone screenshot mockup"
 ```
+
+Edit with a local reference image:
+
+```bash
+python meteor-image/scripts/generate_image.py --prompt "Turn this into a watercolor poster" --image ./input.png
+```
+
+Edit with a mask:
+
+```bash
+python meteor-image/scripts/generate_image.py --prompt "Replace the background with a sunset sky" --image ./input.png --mask ./mask.png
+```
+
+Edit with a remote image URL:
+
+```bash
+python meteor-image/scripts/generate_image.py --prompt "Restyle this as a cinematic product shot" --image-url "https://example.com/input.png"
+```
+
+Notes:
+
+- Repeat `--image` or `--image-url` to provide multiple references
+- `--mask` currently requires local `--image` inputs and must be a PNG
+- Mixed local `--image` and remote `--image-url` inputs automatically use `/responses`
+- Optional tuning flags include `--input-fidelity`, `--size`, `--quality`, `--background`, and `--output`
 
 ## Configuration
 

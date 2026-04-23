@@ -20,6 +20,7 @@
 - 检测当前配置的上游是否支持图片生成
 - 优先使用 `/images/generations`
 - 必要时回退到 `/responses`
+- 支持在编辑流程中传入本地图片、图片 URL 和 PNG 遮罩
 - 当 base URL 指向根路径时，自动尝试补上 `/v1`
 - 当 Python `urllib` 指纹被 Cloudflare/WAF 拦截时，回退到 `curl`
 
@@ -77,6 +78,31 @@ python meteor-image/scripts/detect_image_capability.py
 ```bash
 python meteor-image/scripts/generate_image.py --prompt "A realistic phone screenshot mockup"
 ```
+
+使用本地参考图改图：
+
+```bash
+python meteor-image/scripts/generate_image.py --prompt "Turn this into a watercolor poster" --image ./input.png
+```
+
+使用遮罩改图：
+
+```bash
+python meteor-image/scripts/generate_image.py --prompt "Replace the background with a sunset sky" --image ./input.png --mask ./mask.png
+```
+
+使用远程图片 URL 改图：
+
+```bash
+python meteor-image/scripts/generate_image.py --prompt "Restyle this as a cinematic product shot" --image-url "https://example.com/input.png"
+```
+
+说明：
+
+- 可以重复传入 `--image` 或 `--image-url` 来提供多张参考图
+- `--mask` 当前要求搭配本地 `--image` 使用，并且必须是 PNG
+- 混合使用本地 `--image` 和远程 `--image-url` 时，会自动走 `/responses`
+- 其他可选参数包括 `--input-fidelity`、`--size`、`--quality`、`--background`、`--output`
 
 ## 配置
 

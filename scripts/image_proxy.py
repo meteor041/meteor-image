@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
 import os
 import pathlib
 import shutil
@@ -19,7 +20,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     tomllib = None
 
-PREFERRED_IMAGE_MODELS = ("gpt-image-2", "gpt-image-1")
+PREFERRED_IMAGE_MODELS = ("gpt-image-2", "gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini")
 FALLBACK_RESPONSE_MODELS = (
     "gpt-5.4",
     "gpt-5.2",
@@ -61,6 +62,13 @@ class ApiError(RuntimeError):
         if self.status_code is None:
             return f"{self.path}: {self.message}"
         return f"{self.path}: HTTP {self.status_code} - {self.message}"
+
+
+@dataclass
+class PreparedInputImage:
+    reference: str
+    path: pathlib.Path | None = None
+    mime_type: str | None = None
 
 
 def load_config(
@@ -174,6 +182,71 @@ def describe_config_source(base_url_source: str, api_key_source: str) -> str:
     return "unknown"
 
 
+def normalize_cli_values(values: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    for value in values or []:
+        if not isinstance(value, str):
+            continue
+        stripped = value.strip()
+        if stripped:
+            normalized.append(stripped)
+    return normalized
+
+
+def resolve_local_input_file(value: str, *, label: str) -> pathlib.Path:
+    path = pathlib.Path(value).expanduser()
+    if not path.is_absolute():
+        path = pathlib.Path.cwd() / path
+    path = path.resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"{label} file does not exist: {path}")
+    if not path.is_file():
+        raise ValueError(f"{label} path is not a file: {path}")
+    return path
+
+
+def guess_mime_type(path: pathlib.Path) -> str:
+    mime_type, _ = mimetypes.guess_type(str(path))
+    return mime_type or "application/octet-stream"
+
+
+def encode_data_url(path: pathlib.Path) -> str:
+    mime_type = guess_mime_type(path)
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def prepare_input_images(
+    image_paths: list[str] | None = None,
+    image_urls: list[str] | None = None,
+) -> list[PreparedInputImage]:
+    prepared: list[PreparedInputImage] = []
+
+    for value in normalize_cli_values(image_paths):
+        path = resolve_local_input_file(value, label="image")
+        prepared.append(
+            PreparedInputImage(
+                reference=encode_data_url(path),
+                path=path,
+                mime_type=guess_mime_type(path),
+            )
+        )
+
+    for value in normalize_cli_values(image_urls):
+        prepared.append(PreparedInputImage(reference=value))
+
+    return prepared
+
+
+def prepare_mask_path(mask: str | None) -> pathlib.Path | None:
+    if not mask:
+        return None
+    path = resolve_local_input_file(mask, label="mask")
+    if path.suffix.lower() != ".png":
+        raise ValueError(f"Mask must be a PNG file: {path}")
+    return path
+
+
 def request_json(
     *,
     base_url: str,
@@ -217,6 +290,53 @@ def request_json(
         )
 
 
+def request_multipart(
+    *,
+    base_url: str,
+    api_key: str,
+    method: str,
+    path: str,
+    fields: list[tuple[str, str]],
+    files: list[tuple[str, pathlib.Path]],
+    timeout: int = DEFAULT_HTTP_TIMEOUT,
+) -> Any:
+    transport_key = get_transport_key(base_url)
+    if transport_key in FORCE_CURL_TRANSPORTS:
+        return request_multipart_via_curl(
+            base_url=base_url,
+            api_key=api_key,
+            method=method,
+            path=path,
+            fields=fields,
+            files=files,
+            timeout=timeout,
+        )
+
+    try:
+        return request_multipart_via_requests(
+            base_url=base_url,
+            api_key=api_key,
+            method=method,
+            path=path,
+            fields=fields,
+            files=files,
+            timeout=timeout,
+        )
+    except ApiError as error:
+        if not should_retry_with_curl(error):
+            raise
+        FORCE_CURL_TRANSPORTS.add(transport_key)
+        return request_multipart_via_curl(
+            base_url=base_url,
+            api_key=api_key,
+            method=method,
+            path=path,
+            fields=fields,
+            files=files,
+            timeout=timeout,
+        )
+
+
 def build_request_headers(api_key: str, *, include_json_content_type: bool = True) -> dict[str, str]:
     headers = dict(DEFAULT_REQUEST_HEADERS)
     headers["Authorization"] = f"Bearer {api_key}"
@@ -229,6 +349,30 @@ def build_requests_session() -> requests.Session:
     session = requests.Session()
     session.trust_env = False
     return session
+
+
+def parse_json_response_bytes(*, path: str, status_code: int | None, raw: bytes) -> Any:
+    if status_code is not None and status_code >= 400:
+        body_text = raw.decode("utf-8", errors="replace")
+        raise ApiError(
+            path=path,
+            status_code=status_code,
+            message=extract_error_message(body_text),
+            raw_body=body_text,
+        )
+
+    if not raw:
+        return {}
+
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as error:
+        raise ApiError(
+            path=path,
+            status_code=status_code,
+            message="Response body was not valid JSON",
+            raw_body=raw.decode("utf-8", errors="replace"),
+        ) from error
 
 
 def request_json_via_requests(
@@ -268,28 +412,7 @@ def request_json_via_requests(
             message=message,
         ) from error
 
-    raw = response.content
-    if response.status_code >= 400:
-        body = response.text
-        raise ApiError(
-            path=path,
-            status_code=response.status_code,
-            message=extract_error_message(body),
-            raw_body=body,
-        )
-
-    if not raw:
-        return {}
-
-    try:
-        return json.loads(raw.decode("utf-8"))
-    except json.JSONDecodeError as error:
-        raise ApiError(
-            path=path,
-            status_code=None,
-            message="Response body was not valid JSON",
-            raw_body=raw.decode("utf-8", errors="replace"),
-        ) from error
+    return parse_json_response_bytes(path=path, status_code=response.status_code, raw=response.content)
 
 
 def request_json_via_curl(
@@ -339,27 +462,110 @@ def request_json_via_curl(
         status_code = parse_curl_status_code(header_path.read_text(encoding="utf-8", errors="replace"))
         raw = body_path.read_bytes()
 
-    if status_code >= 400:
-        body_text = raw.decode("utf-8", errors="replace")
-        raise ApiError(
-            path=path,
-            status_code=status_code,
-            message=extract_error_message(body_text),
-            raw_body=body_text,
-        )
+    return parse_json_response_bytes(path=path, status_code=status_code, raw=raw)
 
-    if not raw:
-        return {}
+
+def request_multipart_via_requests(
+    *,
+    base_url: str,
+    api_key: str,
+    method: str,
+    path: str,
+    fields: list[tuple[str, str]],
+    files: list[tuple[str, pathlib.Path]],
+    timeout: int = DEFAULT_HTTP_TIMEOUT,
+) -> Any:
+    headers = build_request_headers(api_key, include_json_content_type=False)
+    session = build_requests_session()
+    request_files = [
+        (name, (file_path.name, file_path.read_bytes(), guess_mime_type(file_path)))
+        for name, file_path in files
+    ]
 
     try:
-        return json.loads(raw.decode("utf-8"))
-    except json.JSONDecodeError as error:
+        response = session.request(
+            method=method.upper(),
+            url=f"{base_url}{path}",
+            headers=headers,
+            data=fields,
+            files=request_files,
+            timeout=timeout,
+        )
+    except requests.RequestException as error:
+        message = str(error)
+        response = getattr(error, "response", None)
+        if response is not None:
+            body = response.text
+            raise ApiError(
+                path=path,
+                status_code=response.status_code,
+                message=extract_error_message(body),
+                raw_body=body,
+            ) from error
         raise ApiError(
             path=path,
-            status_code=status_code,
-            message="Response body was not valid JSON",
-            raw_body=raw.decode("utf-8", errors="replace"),
+            status_code=None,
+            message=message,
         ) from error
+
+    return parse_json_response_bytes(path=path, status_code=response.status_code, raw=response.content)
+
+
+def request_multipart_via_curl(
+    *,
+    base_url: str,
+    api_key: str,
+    method: str,
+    path: str,
+    fields: list[tuple[str, str]],
+    files: list[tuple[str, pathlib.Path]],
+    timeout: int = DEFAULT_HTTP_TIMEOUT,
+) -> Any:
+    curl_bin = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl_bin:
+        raise ApiError(path=path, status_code=None, message="curl is not available")
+
+    headers = [
+        f"{key}: {value}"
+        for key, value in build_request_headers(api_key, include_json_content_type=False).items()
+    ]
+    command = [
+        curl_bin,
+        "-sS",
+        "-L",
+        "-X",
+        method.upper(),
+        f"{base_url}{path}",
+    ]
+
+    with tempfile.TemporaryDirectory(prefix="metero041-curl-") as temp_dir:
+        header_path = pathlib.Path(temp_dir) / "headers.txt"
+        body_path = pathlib.Path(temp_dir) / "body.bin"
+        command.extend(["-D", str(header_path), "-o", str(body_path), "--max-time", str(timeout)])
+
+        for name, value in fields:
+            command.extend(["--form-string", f"{name}={value}"])
+
+        for name, file_path in files:
+            command.extend(["-F", f"{name}=@{file_path};type={guess_mime_type(file_path)}"])
+
+        for header in headers:
+            command.extend(["-H", header])
+
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            stderr = completed.stderr.strip() or "curl request failed"
+            raise ApiError(path=path, status_code=None, message=stderr)
+
+        status_code = parse_curl_status_code(header_path.read_text(encoding="utf-8", errors="replace"))
+        raw = body_path.read_bytes()
+
+    return parse_json_response_bytes(path=path, status_code=status_code, raw=raw)
 
 
 def parse_curl_status_code(header_text: str) -> int:
@@ -485,6 +691,31 @@ def resolve_base_url_and_models(base_url: str, api_key: str) -> tuple[str, list[
     raise last_error
 
 
+def resolve_runtime_context(
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    config = load_config(base_url=base_url, api_key=api_key)
+    resolved_base_url, models, attempts = resolve_base_url_and_models(
+        config["base_url"],
+        config["api_key"],
+    )
+    image_model = pick_image_model(models)
+    if not image_model:
+        raise ConfigError("Missing image model")
+    responses_model = pick_responses_model(models, fallback_model=image_model)
+    return {
+        "base_url": resolved_base_url,
+        "api_key": config["api_key"],
+        "config_source": config["source"],
+        "models": models,
+        "image_model": image_model,
+        "responses_model": responses_model,
+        "base_url_attempts": attempts,
+    }
+
+
 def build_images_payload(
     *,
     model: str,
@@ -508,10 +739,88 @@ def build_images_payload(
     return payload
 
 
+def build_images_edit_json_payload(
+    *,
+    model: str,
+    prompt: str,
+    input_images: list[PreparedInputImage],
+    size: str | None,
+    quality: str | None,
+    background: str | None,
+    input_fidelity: str | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "images": [{"image_url": item.reference} for item in input_images],
+        "n": 1,
+        "output_format": "png",
+    }
+    if size:
+        payload["size"] = size
+    if quality:
+        payload["quality"] = quality
+    if background:
+        payload["background"] = background
+    if input_fidelity:
+        payload["input_fidelity"] = input_fidelity
+    return payload
+
+
+def build_images_edit_form_fields(
+    *,
+    model: str,
+    prompt: str,
+    size: str | None,
+    quality: str | None,
+    background: str | None,
+    input_fidelity: str | None,
+) -> list[tuple[str, str]]:
+    fields = [
+        ("model", model),
+        ("prompt", prompt),
+        ("n", "1"),
+        ("output_format", "png"),
+    ]
+    if size:
+        fields.append(("size", size))
+    if quality:
+        fields.append(("quality", quality))
+    if background:
+        fields.append(("background", background))
+    if input_fidelity:
+        fields.append(("input_fidelity", input_fidelity))
+    return fields
+
+
+def build_responses_input(
+    *,
+    prompt: str,
+    input_images: list[PreparedInputImage],
+    input_fidelity: str | None,
+) -> str | list[dict[str, Any]]:
+    if not input_images:
+        return prompt
+
+    content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+    for input_image in input_images:
+        item: dict[str, Any] = {
+            "type": "input_image",
+            "image_url": input_image.reference,
+        }
+        if input_fidelity:
+            item["detail"] = input_fidelity
+        content.append(item)
+
+    return [{"role": "user", "content": content}]
+
+
 def build_responses_payload(
     *,
     model: str,
     prompt: str,
+    input_images: list[PreparedInputImage] | None,
+    input_fidelity: str | None,
     size: str | None,
     quality: str | None,
     background: str | None,
@@ -520,6 +829,8 @@ def build_responses_payload(
         "type": "image_generation",
         "format": "png",
     }
+    if input_images:
+        tool["action"] = "edit"
     if size:
         tool["size"] = size
     if quality:
@@ -529,7 +840,11 @@ def build_responses_payload(
 
     return {
         "model": model,
-        "input": prompt,
+        "input": build_responses_input(
+            prompt=prompt,
+            input_images=input_images or [],
+            input_fidelity=input_fidelity,
+        ),
         "tools": [tool],
     }
 
@@ -561,12 +876,80 @@ def call_images_generation(
     return extract_image_bytes(response), response
 
 
+def call_images_edit(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    input_images: list[PreparedInputImage],
+    mask_path: pathlib.Path | None,
+    size: str | None,
+    quality: str | None,
+    background: str | None,
+    input_fidelity: str | None,
+) -> tuple[bytes, dict[str, Any]]:
+    local_images = [item for item in input_images if item.path is not None]
+    remote_images = [item for item in input_images if item.path is None]
+
+    if mask_path and remote_images:
+        raise ValueError("Mask editing currently supports only local --image inputs")
+    if mask_path and not local_images:
+        raise ValueError("Mask editing requires at least one local --image input")
+
+    if local_images and remote_images:
+        raise ValueError("Mixed local --image and --image-url inputs are only supported via /responses")
+
+    if local_images:
+        form_fields = build_images_edit_form_fields(
+            model=model,
+            prompt=prompt,
+            size=size,
+            quality=quality,
+            background=background,
+            input_fidelity=input_fidelity,
+        )
+        image_field = "image" if len(local_images) == 1 else "image[]"
+        file_fields = [(image_field, item.path) for item in local_images if item.path is not None]
+        if mask_path is not None:
+            file_fields.append(("mask", mask_path))
+        response = request_multipart(
+            base_url=base_url,
+            api_key=api_key,
+            method="POST",
+            path="/images/edits",
+            fields=form_fields,
+            files=file_fields,
+        )
+        return extract_image_bytes(response), response
+
+    payload = build_images_edit_json_payload(
+        model=model,
+        prompt=prompt,
+        input_images=input_images,
+        size=size,
+        quality=quality,
+        background=background,
+        input_fidelity=input_fidelity,
+    )
+    response = request_json(
+        base_url=base_url,
+        api_key=api_key,
+        method="POST",
+        path="/images/edits",
+        payload=payload,
+    )
+    return extract_image_bytes(response), response
+
+
 def call_responses_generation(
     *,
     base_url: str,
     api_key: str,
     model: str,
     prompt: str,
+    input_images: list[PreparedInputImage] | None,
+    input_fidelity: str | None,
     size: str | None,
     quality: str | None,
     background: str | None,
@@ -574,6 +957,8 @@ def call_responses_generation(
     payload = build_responses_payload(
         model=model,
         prompt=prompt,
+        input_images=input_images,
+        input_fidelity=input_fidelity,
         size=size,
         quality=quality,
         background=background,
@@ -699,6 +1084,8 @@ def classify_error(route: str | None, error: Exception) -> str:
             return "authentication_failure"
         if route == "/images/generations" and error.status_code in {404, 405, 410, 501}:
             return "missing_images_generations"
+        if route == "/images/edits" and error.status_code in {404, 405, 410, 501}:
+            return "missing_images_edits"
         if route == "/responses" and error.status_code in {404, 405, 410, 501}:
             return "missing_responses"
         if error.status_code in {429, 500, 502, 503, 504}:
@@ -714,6 +1101,23 @@ def iter_generation_routes(primary_route: str | None) -> list[str]:
         if route not in unique_routes:
             unique_routes.append(route)
     return unique_routes
+
+
+def iter_edit_routes(
+    *,
+    input_images: list[PreparedInputImage],
+    mask_path: pathlib.Path | None,
+) -> list[str]:
+    local_images = [item for item in input_images if item.path is not None]
+    remote_images = [item for item in input_images if item.path is None]
+
+    if mask_path is not None:
+        return ["/images/edits"]
+    if local_images and remote_images:
+        return ["/responses"]
+    if input_images:
+        return ["/images/edits", "/responses"]
+    return ["/responses"]
 
 
 def detect_capability(
@@ -738,28 +1142,20 @@ def detect_capability(
     }
 
     try:
-        config = load_config(base_url=base_url, api_key=api_key)
-        resolved_base_url = config["base_url"]
-        resolved_api_key = config["api_key"]
-        report["config_source"] = config["source"]
-        resolved_base_url, models, attempts = resolve_base_url_and_models(
-            resolved_base_url,
-            resolved_api_key,
-        )
-        report["base_url"] = resolved_base_url
-        report["base_url_attempts"] = attempts
+        context = resolve_runtime_context(base_url=base_url, api_key=api_key)
     except Exception as error:
         report["failure_reason"] = classify_error(None, error)
         report["error"] = str(error)
         return report
 
-    report["models"] = models
-    image_model = pick_image_model(models)
-    if not image_model:
-        report["failure_reason"] = "missing_image_model"
-        return report
-
-    responses_model = pick_responses_model(models, fallback_model=image_model)
+    resolved_base_url = str(context["base_url"])
+    resolved_api_key = str(context["api_key"])
+    image_model = str(context["image_model"])
+    responses_model = str(context["responses_model"])
+    report["config_source"] = context["config_source"]
+    report["base_url"] = resolved_base_url
+    report["base_url_attempts"] = context["base_url_attempts"]
+    report["models"] = context["models"]
     report["image_model"] = image_model
     report["responses_model"] = responses_model
 
@@ -793,6 +1189,8 @@ def detect_capability(
             api_key=resolved_api_key,
             model=responses_model,
             prompt=prompt,
+            input_images=None,
+            input_fidelity=None,
             size=size,
             quality=quality,
             background=background,
@@ -817,6 +1215,10 @@ def detect_capability(
 def generate_image(
     *,
     prompt: str,
+    image_paths: list[str] | None = None,
+    image_urls: list[str] | None = None,
+    mask: str | None = None,
+    input_fidelity: str | None = None,
     output: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
@@ -824,28 +1226,28 @@ def generate_image(
     quality: str | None = "high",
     background: str | None = None,
 ) -> dict[str, Any]:
-    report = detect_capability(
-        base_url=base_url,
-        api_key=api_key,
-        size=size,
-        quality=quality,
-        background=background,
-    )
-    if not report.get("supported"):
-        raise RuntimeError(json.dumps(report, indent=2))
+    input_images = prepare_input_images(image_paths=image_paths, image_urls=image_urls)
+    mask_path = prepare_mask_path(mask)
+    if mask_path is not None and not input_images:
+        raise ValueError("Mask editing requires at least one --image input")
 
-    config = load_config(base_url=base_url, api_key=api_key)
-    resolved_api_key = config["api_key"]
-    resolved_base_url = str(report["base_url"])
-    route = report["route"]
-    image_model = report["image_model"]
-    responses_model = report["responses_model"]
+    context = resolve_runtime_context(base_url=base_url, api_key=api_key)
+    resolved_api_key = str(context["api_key"])
+    resolved_base_url = str(context["base_url"])
+    image_model = str(context["image_model"])
+    responses_model = str(context["responses_model"])
     generation_errors: list[dict[str, str]] = []
     image_bytes: bytes | None = None
     used_model: str | None = None
     used_route: str | None = None
 
-    for candidate_route in iter_generation_routes(route):
+    candidate_routes = (
+        iter_edit_routes(input_images=input_images, mask_path=mask_path)
+        if input_images or mask_path is not None
+        else iter_generation_routes(None)
+    )
+
+    for candidate_route in candidate_routes:
         try:
             if candidate_route == "/images/generations":
                 image_bytes, _ = call_images_generation(
@@ -858,12 +1260,28 @@ def generate_image(
                     background=background,
                 )
                 used_model = image_model
+            elif candidate_route == "/images/edits":
+                image_bytes, _ = call_images_edit(
+                    base_url=resolved_base_url,
+                    api_key=resolved_api_key,
+                    model=image_model,
+                    prompt=prompt,
+                    input_images=input_images,
+                    mask_path=mask_path,
+                    size=size,
+                    quality=quality,
+                    background=background,
+                    input_fidelity=input_fidelity,
+                )
+                used_model = image_model
             else:
                 image_bytes, _ = call_responses_generation(
                     base_url=resolved_base_url,
                     api_key=resolved_api_key,
                     model=responses_model,
                     prompt=prompt,
+                    input_images=input_images or None,
+                    input_fidelity=input_fidelity,
                     size=size,
                     quality=quality,
                     background=background,
@@ -886,11 +1304,11 @@ def generate_image(
         raise RuntimeError(
             json.dumps(
                 {
-                    "supported": True,
+                    "supported": False,
                     "base_url": resolved_base_url,
                     "image_model": image_model,
                     "responses_model": responses_model,
-                    "route": route,
+                    "routes_attempted": candidate_routes,
                     "generation_errors": generation_errors,
                 },
                 indent=2,
@@ -907,6 +1325,7 @@ def generate_image(
         "model": used_model,
         "image_model": image_model,
         "responses_model": responses_model,
+        "edit_mode": bool(input_images or mask_path is not None),
     }
 
 
